@@ -1,0 +1,9 @@
+geopandas==1.2.0
+ipyleaflet==0.20.0
+numpy==2.5.4
+pandas==3.0.6
+PuLP==4.0.0
+pyogrio==0.13.0
+requests==2.34.2
+shiny==1.8.0
+shinywidgets==0.8.1
