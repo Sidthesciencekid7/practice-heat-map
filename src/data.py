@@ -1,7 +1,7 @@
 """Fetch and cache all raw inputs for the Boston/Cambridge heat-risk map.
 
 Sources (all free, no API key):
-  - Census ACS 5-year (2022) tract demographics   -> api.census.gov
+  - CDC Social Vulnerability Index 2022 (tracts)  -> svi.cdc.gov
   - Census cartographic tract boundaries (TIGER)  -> www2.census.gov
   - Open-Meteo 7-day forecast on a coarse grid    -> api.open-meteo.com
   - OpenStreetMap candidate cooling sites         -> overpass-api.de
@@ -9,7 +9,6 @@ Everything is cached under data/ so the app runs offline after the first build.
 """
 from pathlib import Path
 import io
-import os
 import time
 import zipfile
 
@@ -24,16 +23,6 @@ DATA.mkdir(exist_ok=True)
 STATE, COUNTIES = "25", ["025", "017"]  # MA: Suffolk (Boston) + Middlesex (Cambridge, Somerville...)
 BBOX = (42.20, -71.25, 42.48, -70.98)  # south, west, north, east: Greater Boston core
 
-# ACS 2022 5-year variables
-_MALE_65 = [f"B01001_{i:03d}E" for i in range(20, 26)]
-_FEMALE_65 = [f"B01001_{i:03d}E" for i in range(44, 50)]
-_VARS = (
-    ["B01001_001E", "B11001_001E", "B11001_008E", "B19013_001E",
-     "B17001_001E", "B17001_002E", "B25034_001E", "B25034_009E",
-     "B25034_010E", "B25034_011E"]
-    + _MALE_65 + _FEMALE_65
-)
-
 
 def _get(url, **kw):
     r = requests.get(url, timeout=60, **kw)
@@ -42,41 +31,24 @@ def _get(url, **kw):
 
 
 def load_demographics() -> pd.DataFrame:
-    f = DATA / "acs_tracts.csv"
+    """CDC/ATSDR Social Vulnerability Index 2022 (built from ACS 2018-2022), tract level.
+
+    Keyless alternative to the Census API. We keep the heat-relevant columns:
+    residents 65+, poverty (<150% of the line), disability, no vehicle, limited English,
+    multi-unit housing (a density proxy) and no home internet.
+    """
+    f = DATA / "svi_tracts.csv"
     if f.exists():
         return pd.read_csv(f, dtype={"GEOID": str})
-    key = os.environ.get("CENSUS_API_KEY")
-    if not key:
-        raise SystemExit(
-            "The Census API now requires a free key.\n"
-            "Get one at https://api.census.gov/data/key_signup.html (arrives by email),\n"
-            "then run:  $env:CENSUS_API_KEY = '<your key>'"
-        )
-    frames = []
-    for county in COUNTIES:
-        url = (
-            "https://api.census.gov/data/2022/acs/acs5"
-            f"?get={','.join(_VARS)}&for=tract:*&in=state:{STATE}%20county:{county}&key={key}"
-        )
-        resp = _get(url)
-        if "json" not in resp.headers.get("content-type", ""):
-            raise SystemExit(f"Census API rejected the request (is the key valid/activated?):\n{resp.text[:200]}")
-        rows = resp.json()
-        frames.append(pd.DataFrame(rows[1:], columns=rows[0]))
-    df = pd.concat(frames, ignore_index=True)
-    df["GEOID"] = df["state"] + df["county"] + df["tract"]
-    num = df[_VARS].apply(pd.to_numeric, errors="coerce")
-    num = num.where(num > -1)  # Census uses -666666666 for "not available"
-    out = pd.DataFrame({"GEOID": df["GEOID"]})
-    out["pop"] = num["B01001_001E"]
-    out["pop65"] = num[_MALE_65 + _FEMALE_65].sum(axis=1)
-    out["households"] = num["B11001_001E"]
-    out["alone"] = num["B11001_008E"]  # one-person non-family households
-    out["median_income"] = num["B19013_001E"]
-    out["pov_universe"] = num["B17001_001E"]
-    out["pov"] = num["B17001_002E"]
-    out["housing_units"] = num["B25034_001E"]
-    out["pre1960"] = num[["B25034_009E", "B25034_010E", "B25034_011E"]].sum(axis=1)
+    url = "https://svi.cdc.gov/Documents/Data/2022/csv/states/Massachusetts.csv"
+    raw = pd.read_csv(io.BytesIO(_get(url, headers={"User-Agent": "heat-risk-map-practice/0.1"}).content),
+                      dtype={"FIPS": str})
+    cols = {"FIPS": "GEOID", "E_TOTPOP": "pop", "E_AGE65": "pop65", "EP_AGE65": "pct65",
+            "EP_POV150": "pct_poverty", "EP_DISABL": "pct_disabled", "EP_NOVEH": "pct_noveh",
+            "EP_LIMENG": "pct_limeng", "EP_MUNIT": "pct_multiunit", "EP_NOINT": "pct_nointernet"}
+    out = raw[list(cols)].rename(columns=cols)
+    out = out[out["GEOID"].str[2:5].isin(COUNTIES)].copy()
+    out = out.replace(-999, np.nan)  # SVI uses -999 for "not available"
     out.to_csv(f, index=False)
     return out
 
